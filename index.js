@@ -7,6 +7,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
 const pdf = require('pdf-parse');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,6 +25,15 @@ const openai = new OpenAI({
 
 // Middleware to parse JSON
 app.use(express.json());
+
+// Rate limiter for API endpoints
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
 
 // URL validation to prevent SSRF attacks
 function isValidUrl(url) {
@@ -121,7 +131,7 @@ async function extractPriceList(filePath) {
 }
 
 // API endpoint for URL processing
-app.post('/api/extract-url', authenticate, async (req, res) => {
+app.post('/api/extract-url', apiLimiter, authenticate, async (req, res) => {
   let pdfPath = null;
   
   try {
@@ -169,7 +179,7 @@ app.post('/api/extract-url', authenticate, async (req, res) => {
 });
 
 // API endpoint for file upload
-app.post('/api/extract-file', authenticate, upload.single('file'), async (req, res) => {
+app.post('/api/extract-file', apiLimiter, authenticate, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'File is required' });
