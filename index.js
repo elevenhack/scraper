@@ -5,6 +5,8 @@ const { chromium } = require('playwright');
 const OpenAI = require('openai');
 const fs = require('fs').promises;
 const path = require('path');
+const crypto = require('crypto');
+const pdf = require('pdf-parse');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,6 +24,32 @@ const openai = new OpenAI({
 
 // Middleware to parse JSON
 app.use(express.json());
+
+// URL validation to prevent SSRF attacks
+function isValidUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+    // Only allow http and https protocols
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      return false;
+    }
+    // Prevent access to internal/private networks
+    const hostname = parsedUrl.hostname;
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '0.0.0.0' ||
+      hostname.startsWith('192.168.') ||
+      hostname.startsWith('10.') ||
+      hostname.match(/^172\.(1[6-9]|2[0-9]|3[01])\./)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Bearer token authentication middleware
 const authenticate = (req, res, next) => {
@@ -49,7 +77,7 @@ async function downloadPdfFromUrl(url) {
   try {
     await page.goto(url, { waitUntil: 'networkidle' });
     
-    const pdfPath = path.join(__dirname, 'uploads', `temp-${Date.now()}.pdf`);
+    const pdfPath = path.join(__dirname, 'uploads', `temp-${crypto.randomUUID()}.pdf`);
     await page.pdf({ path: pdfPath, format: 'A4' });
     
     await browser.close();
@@ -63,28 +91,24 @@ async function downloadPdfFromUrl(url) {
 // Function to extract price list using ChatGPT
 async function extractPriceList(filePath) {
   try {
-    // Read the file
-    const fileBuffer = await fs.readFile(filePath);
-    const base64File = fileBuffer.toString('base64');
+    // Read the PDF file
+    const dataBuffer = await fs.readFile(filePath);
     
-    // Create a chat completion with file context
+    // Extract text from PDF
+    const pdfData = await pdf(dataBuffer);
+    const pdfText = pdfData.text;
+    
+    // Use ChatGPT to extract price list from text
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         {
+          role: 'system',
+          content: 'You are a helpful assistant that extracts price lists from documents.'
+        },
+        {
           role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: 'Extract a price list from this document in Markdown format'
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:application/pdf;base64,${base64File}`
-              }
-            }
-          ]
+          content: `Extract a price list from this document in Markdown format:\n\n${pdfText}`
         }
       ],
       max_tokens: 4096
@@ -92,12 +116,14 @@ async function extractPriceList(filePath) {
     
     return response.choices[0].message.content;
   } catch (error) {
-    throw new Error(`ChatGPT extraction failed: ${error.message}`);
+    throw new Error(`Failed to extract price list: ${error.message}`);
   }
 }
 
 // API endpoint for URL processing
 app.post('/api/extract-url', authenticate, async (req, res) => {
+  let pdfPath = null;
+  
   try {
     const { url } = req.body;
     
@@ -105,14 +131,20 @@ app.post('/api/extract-url', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
     
+    // Validate URL to prevent SSRF attacks
+    if (!isValidUrl(url)) {
+      return res.status(400).json({ error: 'Invalid URL or URL not allowed' });
+    }
+    
     // Download PDF from URL
-    const pdfPath = await downloadPdfFromUrl(url);
+    pdfPath = await downloadPdfFromUrl(url);
     
     // Extract price list using ChatGPT
     const priceList = await extractPriceList(pdfPath);
     
     // Clean up the temporary file
     await fs.unlink(pdfPath);
+    pdfPath = null;
     
     res.json({ 
       success: true, 
@@ -120,9 +152,18 @@ app.post('/api/extract-url', authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error('Error processing URL:', error);
+    
+    // Clean up the temporary file if it exists
+    if (pdfPath) {
+      try {
+        await fs.unlink(pdfPath);
+      } catch (unlinkError) {
+        console.error('Error cleaning up file:', unlinkError);
+      }
+    }
+    
     res.status(500).json({ 
-      error: 'Failed to process URL', 
-      message: error.message 
+      error: 'Failed to process URL'
     });
   }
 });
@@ -157,8 +198,7 @@ app.post('/api/extract-file', authenticate, upload.single('file'), async (req, r
     }
     
     res.status(500).json({ 
-      error: 'Failed to process file', 
-      message: error.message 
+      error: 'Failed to process file'
     });
   }
 });
