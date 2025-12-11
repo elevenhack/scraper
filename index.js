@@ -218,11 +218,19 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Create uploads directory before starting server
+const uploadsDir = path.join(__dirname, 'uploads');
+try {
+  const fsSync = require('fs');
+  fsSync.mkdirSync(uploadsDir, { recursive: true });
+} catch (error) {
+  if (error.code !== 'EEXIST') {
+    console.error('Failed to create uploads directory:', error);
+    process.exit(1);
+  }
+}
+
 // Start server
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
-  
-  // Create uploads directory if it doesn't exist
-  const uploadsDir = path.join(__dirname, 'uploads');
-  fs.mkdir(uploadsDir, { recursive: true }).catch(console.error);
 });
